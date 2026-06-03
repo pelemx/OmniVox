@@ -30,8 +30,8 @@ files = [
 mirror_url = "https://hf-mirror.com/k2-fsa/OmniVoice/resolve/main"
 
 for f in files:
-    # -k ignores SSL cert errors, -L follows redirects, -o saves to the explicit path
-    run_cmd(f"curl -k -L -o ./models/{f} {mirror_url}/{f}")
+    # Added ?download=true to bypass LFS text pointers and grab the raw binary
+    run_cmd(f"curl -k -L -o ./models/{f} '{mirror_url}/{f}?download=true'")
 
 # 4. Generate the custom port 3033 FastAPI backend
 api_code = """
@@ -73,6 +73,7 @@ async def gen_speech(req: TTSReq):
         return {'status': 'success', 'audio_base64': base64.b64encode(buf.read()).decode('utf-8')}
     except Exception as e:
         if tmp and os.path.exists(tmp): os.remove(tmp)
+            
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':
