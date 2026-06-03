@@ -1,6 +1,5 @@
 import os
 import subprocess
-import sys
 
 print("\n--- SHARX OMNIVOICE DEPLOYMENT ---")
 
@@ -12,26 +11,39 @@ def run_cmd(cmd):
 run_cmd("python3 -m pip install --upgrade pip wheel setuptools")
 run_cmd("python3 -m pip install soxr --only-binary :all:")
 
-# 2. Install dependencies and the OmniVoice package
-run_cmd("python3 -m pip install huggingface_hub fastapi uvicorn pydantic soundfile")
+# 2. Install dependencies AND the crucial hf-xet package for Xet storage translation
+run_cmd("python3 -m pip install huggingface_hub fastapi uvicorn pydantic soundfile requests hf-xet")
 run_cmd("python3 -m pip install -e .")
 
-# 3. Route through domestic mirror using native curl (Bypasses Python SSL/Env bugs)
-print("Pulling 1.2GB Model via native curl and hf-mirror.com...")
-os.makedirs("./models", exist_ok=True)
-files = [
-    "config.json", 
-    "model.safetensors", 
-    "tokenizer.json", 
-    "tokenizer_config.json", 
-    "generation_config.json", 
-    "chat_template.jinja"
-]
-mirror_url = "https://hf-mirror.com/k2-fsa/OmniVoice/resolve/main"
+# 3. Create a dedicated download script with an aggressive SSL bypass
+dl_script = """
+import os
+import requests
+import warnings
+from huggingface_hub import snapshot_download
 
-for f in files:
-    # Added ?download=true to bypass LFS text pointers and grab the raw binary
-    run_cmd(f"curl -k -L -o ./models/{f} '{mirror_url}/{f}?download=true'")
+# Suppress the insecure request warnings
+warnings.filterwarnings('ignore')
+
+# Monkey-patch requests to globally disable SSL verification
+old_request = requests.Session.request
+def new_request(self, method, url, **kwargs):
+    kwargs['verify'] = False
+    return old_request(self, method, url, **kwargs)
+requests.Session.request = new_request
+
+# Force mirror routing
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+print("Downloading 2.45GB Xet-backed Model (Bypassing SSL Firewall)...")
+snapshot_download(repo_id="k2-fsa/OmniVoice", local_dir="./models")
+"""
+
+with open("sharx_download.py", "w") as f:
+    f.write(dl_script.strip())
+
+# Execute the local downloader
+run_cmd("python3 sharx_download.py")
 
 # 4. Generate the custom port 3033 FastAPI backend
 api_code = """
@@ -73,7 +85,6 @@ async def gen_speech(req: TTSReq):
         return {'status': 'success', 'audio_base64': base64.b64encode(buf.read()).decode('utf-8')}
     except Exception as e:
         if tmp and os.path.exists(tmp): os.remove(tmp)
-            
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':
