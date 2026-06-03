@@ -16,11 +16,22 @@ run_cmd("python3 -m pip install soxr --only-binary :all:")
 run_cmd("python3 -m pip install huggingface_hub fastapi uvicorn pydantic soundfile")
 run_cmd("python3 -m pip install -e .")
 
-# 3. Route through domestic mirror and download weights
-print("Pulling 1.2GB Model via hf-mirror.com...")
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-from huggingface_hub import snapshot_download
-snapshot_download(repo_id="k2-fsa/OmniVoice", local_dir="./models")
+# 3. Route through domestic mirror using native curl (Bypasses Python SSL/Env bugs)
+print("Pulling 1.2GB Model via native curl and hf-mirror.com...")
+os.makedirs("./models", exist_ok=True)
+files = [
+    "config.json", 
+    "model.safetensors", 
+    "tokenizer.json", 
+    "tokenizer_config.json", 
+    "generation_config.json", 
+    "chat_template.jinja"
+]
+mirror_url = "https://hf-mirror.com/k2-fsa/OmniVoice/resolve/main"
+
+for f in files:
+    # -k ignores SSL cert errors, -L follows redirects, -o saves to the explicit path
+    run_cmd(f"curl -k -L -o ./models/{f} {mirror_url}/{f}")
 
 # 4. Generate the custom port 3033 FastAPI backend
 api_code = """
