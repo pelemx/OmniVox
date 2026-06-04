@@ -1,19 +1,24 @@
 import os
 import subprocess
+import sys
+
+# Lock the execution to the exact Python binary that launched this script
+PY_BIN = sys.executable
 
 print("\n--- SHARX OMNIVOICE DEPLOYMENT ---")
+print(f"Using Python runtime: {PY_BIN}")
 
 def run_cmd(cmd):
     print(f"Running: {cmd}")
     subprocess.run(cmd, shell=True, check=True)
 
 # 1. Bypass outdated GCC compiler and fix package states
-run_cmd("python3 -m pip install --upgrade pip wheel setuptools")
-run_cmd("python3 -m pip install soxr --only-binary :all:")
+run_cmd(f'"{PY_BIN}" -m pip install --upgrade pip wheel setuptools')
+run_cmd(f'"{PY_BIN}" -m pip install soxr --only-binary :all:')
 
 # 2. Install dependencies AND the crucial hf-xet package for Xet storage translation
-run_cmd("python3 -m pip install huggingface_hub fastapi uvicorn pydantic soundfile requests hf-xet")
-run_cmd("python3 -m pip install -e .")
+run_cmd(f'"{PY_BIN}" -m pip install huggingface_hub fastapi uvicorn pydantic soundfile requests hf-xet')
+run_cmd(f'"{PY_BIN}" -m pip install -e .')
 
 # 3. Create a dedicated download script with an aggressive SSL bypass
 dl_script = """
@@ -42,8 +47,8 @@ snapshot_download(repo_id="k2-fsa/OmniVoice", local_dir="./models")
 with open("sharx_download.py", "w") as f:
     f.write(dl_script.strip())
 
-# Execute the local downloader
-run_cmd("python3 sharx_download.py")
+# Execute the local downloader using the locked Python binary
+run_cmd(f'"{PY_BIN}" sharx_download.py')
 
 # 4. Generate the custom port 3033 FastAPI backend
 api_code = """
@@ -96,5 +101,5 @@ with open("omni_api.py", "w") as f:
 
 # 5. Launch the daemon
 print("Booting Server on Port 3033...")
-subprocess.Popen(["python3", "omni_api.py"], stdout=open("omni_api.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+subprocess.Popen([PY_BIN, "omni_api.py"], stdout=open("omni_api.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
 print("Deployment Complete. Run 'tail -f omni_api.log' to monitor boot status.")
