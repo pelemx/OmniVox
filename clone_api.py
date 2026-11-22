@@ -1,4 +1,4 @@
-import io, os, re, json, uuid, base64, tempfile, ssl
+import io, os, re, json, uuid, base64, ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 from pathlib import Path
 from typing import Optional
@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from omnivoice import OmniVoice
 
-app = FastAPI(title="Sharx OmniVox TTS & Clone API", version="1.0.0")
+app = FastAPI(title="Sharx OmniVox TTS API", version="1.0.0")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 BASE_DIR = Path(__file__).resolve().parent
 VOICES_DIR = BASE_DIR / "voices"
@@ -31,28 +31,40 @@ def load_db() -> dict:
 def save_db(data: dict):
     VOICES_DB.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-def synth_wav_bytes(text: str, ref_audio: Optional[str] = None, ref_text: Optional[str] = None) -> bytes:
+def synth_wav_bytes(
+    text: str,
+    ref_audio: Optional[str] = None,
+    ref_text: Optional[str] = None,
+    language: Optional[str] = None,
+    speed: float = 1.0,
+) -> bytes:
     kwargs = {"text": text}
     if ref_audio:
         kwargs["ref_audio"] = ref_audio
     if ref_text:
         kwargs["ref_text"] = ref_text
-    audio = model.generate(**kwargs)
-    wav_arr = audio[0].cpu().numpy() if torch.is_tensor(audio[0]) else audio[0]
+    if language:
+        kwargs["language"] = language
+    if speed and speed != 1.0:
+        kwargs["speed"] = speed
+    try:
+        audio = model.generate(**kwargs)
+    except TypeError:
+        kwargs.pop("language", None)
+        kwargs.pop("speed", None)
+        audio = model.generate(**kwargs)
+    wav_arr = (audio[0].detach().cpu().float().numpy() if torch.is_tensor(audio[0]) else audio[0]).squeeze()
     buf = io.BytesIO()
-    sf.write(buf, wav_arr, 24000, format="WAV")
+    sf.write(buf, wav_arr, 24000, format="WAV", subtype="PCM_16")
     return buf.getvalue()
 
 class TTSReq(BaseModel):
     text: str
     voice_id: Optional[str] = None
+    language: Optional[str] = None
+    speed: float = 1.0
     ref_text: Optional[str] = None
-    return_base64: bool = False
-
-class CloneReq(BaseModel):
-    text: str
-    ref_audio_base64: str
-    ref_text: Optional[str] = None
+    return_base64: bool = True
 
 @app.get("/api/v1/health")
 async def health():
@@ -73,19 +85,15 @@ async def upload_voice(
     db = load_db()
     raw_id = clean_opt(voice_id) or name.strip()
     base = re.sub(r"[^a-z0-9_-]+", "_", raw_id.lower()).strip("_") or uuid.uuid4().hex[:8]
-    vid = base
-    i = 2
+    vid, i = base, 2
     while vid in db:
         vid = f"{base}_{i}"
         i += 1
-
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty audio file")
-
     wav_path = VOICES_DIR / f"{vid}.wav"
     wav_path.write_bytes(raw)
-
     db[vid] = {
         "name": name.strip(),
         "file": str(wav_path),
@@ -119,28 +127,18 @@ async def generate_tts(req: TTSReq):
         if not ref_text:
             ref_text = clean_opt(db[vid].get("ref_text"))
     try:
-        wav_bytes = synth_wav_bytes(req.text, ref_audio=ref_audio, ref_text=ref_text)
+        wav_bytes = synth_wav_bytes(
+            req.text,
+            ref_audio=ref_audio,
+            ref_text=ref_text,
+            language=clean_opt(req.language),
+            speed=req.speed,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     if req.return_base64:
         return {"status": "success", "audio_base64": base64.b64encode(wav_bytes).decode("utf-8")}
     return Response(content=wav_bytes, media_type="audio/wav")
-
-@app.post("/api/v1/audio/clone")
-@app.post("/v1/audio/clone")
-async def clone_voice(req: CloneReq):
-    tmp_wav = None
-    try:
-        fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
-        with os.fdopen(fd, "wb") as fb:
-            fb.write(base64.b64decode(req.ref_audio_base64))
-        wav_bytes = synth_wav_bytes(req.text, ref_audio=tmp_wav, ref_text=clean_opt(req.ref_text))
-        return {"status": "success", "audio_base64": base64.b64encode(wav_bytes).decode("utf-8")}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if tmp_wav and os.path.exists(tmp_wav):
-            os.remove(tmp_wav)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=3033)
