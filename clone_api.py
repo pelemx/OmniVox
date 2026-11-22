@@ -1,4 +1,4 @@
-import io, os, json, uuid, base64, tempfile, ssl
+import io, os, re, json, uuid, base64, tempfile, ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 from pathlib import Path
 from typing import Optional
@@ -12,11 +12,18 @@ from omnivoice import OmniVoice
 
 app = FastAPI(title="Sharx OmniVox TTS & Clone API", version="1.0.0")
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-VOICES_DIR = Path("./voices")
+BASE_DIR = Path(__file__).resolve().parent
+VOICES_DIR = BASE_DIR / "voices"
 VOICES_DB = VOICES_DIR / "voices.json"
 VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
-model = OmniVoice.from_pretrained("./models", device_map=DEVICE, dtype=torch.float16)
+model = OmniVoice.from_pretrained(str(BASE_DIR / "models"), device_map=DEVICE, dtype=torch.float16)
+
+def clean_opt(val: Optional[str]) -> Optional[str]:
+    if not val:
+        return None
+    s = val.strip()
+    return None if s.lower() in ("", "string", "null", "none") else s
 
 def load_db() -> dict:
     return json.loads(VOICES_DB.read_text(encoding="utf-8")) if VOICES_DB.exists() else {}
@@ -63,14 +70,27 @@ async def upload_voice(
     voice_id: Optional[str] = Form(None),
     ref_text: Optional[str] = Form(None),
 ):
-    vid = (voice_id or name).strip().lower().replace(" ", "_") or uuid.uuid4().hex[:8]
-    wav_path = VOICES_DIR / f"{vid}.wav"
+    db = load_db()
+    raw_id = clean_opt(voice_id) or name.strip()
+    base = re.sub(r"[^a-z0-9_-]+", "_", raw_id.lower()).strip("_") or uuid.uuid4().hex[:8]
+    vid = base
+    i = 2
+    while vid in db:
+        vid = f"{base}_{i}"
+        i += 1
+
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty audio file")
+
+    wav_path = VOICES_DIR / f"{vid}.wav"
     wav_path.write_bytes(raw)
-    db = load_db()
-    db[vid] = {"name": name, "file": str(wav_path), "ref_text": ref_text}
+
+    db[vid] = {
+        "name": name.strip(),
+        "file": str(wav_path),
+        "ref_text": clean_opt(ref_text),
+    }
     save_db(db)
     return {"status": "uploaded", "voice_id": vid, "voice": db[vid]}
 
@@ -89,14 +109,15 @@ async def delete_voice(voice_id: str):
 @app.post("/api/v1/tts")
 async def generate_tts(req: TTSReq):
     ref_audio = None
-    ref_text = req.ref_text
-    if req.voice_id:
+    ref_text = clean_opt(req.ref_text)
+    vid = clean_opt(req.voice_id)
+    if vid:
         db = load_db()
-        if req.voice_id not in db:
-            raise HTTPException(status_code=404, detail=f"voice_id '{req.voice_id}' not found")
-        ref_audio = db[req.voice_id]["file"]
+        if vid not in db:
+            raise HTTPException(status_code=404, detail=f"voice_id '{vid}' not found")
+        ref_audio = db[vid]["file"]
         if not ref_text:
-            ref_text = db[req.voice_id].get("ref_text")
+            ref_text = clean_opt(db[vid].get("ref_text"))
     try:
         wav_bytes = synth_wav_bytes(req.text, ref_audio=ref_audio, ref_text=ref_text)
     except Exception as e:
@@ -113,7 +134,7 @@ async def clone_voice(req: CloneReq):
         fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
         with os.fdopen(fd, "wb") as fb:
             fb.write(base64.b64decode(req.ref_audio_base64))
-        wav_bytes = synth_wav_bytes(req.text, ref_audio=tmp_wav, ref_text=req.ref_text)
+        wav_bytes = synth_wav_bytes(req.text, ref_audio=tmp_wav, ref_text=clean_opt(req.ref_text))
         return {"status": "success", "audio_base64": base64.b64encode(wav_bytes).decode("utf-8")}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
